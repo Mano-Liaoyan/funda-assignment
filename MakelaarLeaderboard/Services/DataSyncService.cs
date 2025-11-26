@@ -1,4 +1,5 @@
 ﻿using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using MakelaarLeaderboard.Data;
@@ -14,6 +15,7 @@ public class DataSyncService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TimeSpan _syncInterval = TimeSpan.FromMinutes(5);
+
     private readonly JsonSerializerOptions _jsonSerializerOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -31,7 +33,8 @@ public class DataSyncService : BackgroundService
         _apiUri = configuration["DataSync:ApiUri"] ?? throw new Exception("DataSync:ApiUri not configured");
     }
 
-    private async Task<string> PageUrlBuilder(string searchType = "koop", string city = "amsterdam", string[]? buitenruimtes = null, int page = 1, int pageSize = 25)
+    private async Task<string> PageUrlBuilder(string searchType = "koop", string city = "amsterdam",
+        string[]? buitenruimtes = null, int page = 1, int pageSize = 25)
     {
         var sb = new StringBuilder(_apiUri);
 
@@ -132,26 +135,50 @@ public class DataSyncService : BackgroundService
         }
     }
 
-    private async Task<ApiResponse?> FetchDataFromApiAsync(CancellationToken cancellationToken, string[]? buitenruimtes = null)
+    private async Task<ApiResponse?> FetchDataFromApiAsync(CancellationToken cancellationToken,
+        string[]? buitenruimtes = null)
     {
-        HttpClient httpClient = _httpClientFactory.CreateClient();
+        const int maxRetries = 5;
+
+        var httpClient = _httpClientFactory.CreateClient();
         var allHouses = new List<House>();
         var makelaarsDict = new Dictionary<int, Makelaar>();
 
         try
         {
-            int currentPage = 1;
-            int totalPages = 1;
+            var retryCount = 0;
 
+            var currentPage = 1;
+            var totalPages = 1;
             do
             {
                 // Build URL with page parameter
                 string pageUrl = await PageUrlBuilder(buitenruimtes: buitenruimtes, page: currentPage);
                 _logger.LogInformation($"pageUrl:\n{pageUrl}");
-
                 _logger.LogInformation($"Fetching page {currentPage} from API");
 
                 HttpResponseMessage response = await httpClient.GetAsync(pageUrl, cancellationToken);
+
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    retryCount++;
+
+                    if (retryCount <= maxRetries)
+                    {
+                        // 1 min -> 2 min -> 4 min -> 8 min -> 16 min
+                        var delay = TimeSpan.FromMinutes((int)Math.Pow(2, retryCount - 1));
+                        _logger.LogWarning(
+                            $"Request timeout for page {currentPage}.\n" +
+                            $"Retrying in {delay} ... (attempt {retryCount}/{maxRetries})");
+                        await Task.Delay(delay, cancellationToken);
+                        continue;
+                    }
+
+                    _logger.LogWarning(
+                        $"Reached max retry count: {maxRetries}. Saving existing data...");
+                    break;
+                }
+
                 response.EnsureSuccessStatusCode();
 
                 string content = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -185,8 +212,6 @@ public class DataSyncService : BackgroundService
 
                     bool hasTuin = pageUrl.Contains("tuin", StringComparison.OrdinalIgnoreCase);
 
-                    _logger.LogInformation($"HasTuin {hasTuin}");
-
                     allHouses.Add(new House
                     {
                         Id = obj.Id,
@@ -204,10 +229,10 @@ public class DataSyncService : BackgroundService
                 // This means our delay should be at least 600ms, for convenient and some buffer, I use 610 ms here
                 if (currentPage <= totalPages)
                 {
-                    await Task.Delay(610, cancellationToken);
+                    await Task.Delay(10, cancellationToken);
                 }
-
-            } while (currentPage <= totalPages && !cancellationToken.IsCancellationRequested);
+            } while (currentPage <= totalPages && retryCount < maxRetries &&
+                     !cancellationToken.IsCancellationRequested);
 
             _logger.LogInformation($"Fetched total of {allHouses.Count} houses and {makelaarsDict.Count} makelaars");
 
@@ -220,21 +245,26 @@ public class DataSyncService : BackgroundService
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "HTTP error fetching data from API");
-            return null;
+            return new ApiResponse
+            {
+                Makelaars = makelaarsDict.Values.ToList(),
+                Houses = allHouses
+            };
         }
         catch (JsonException ex)
         {
             _logger.LogError(ex, "JSON deserialization error");
-            return null;
+            return new ApiResponse
+            {
+                Makelaars = makelaarsDict.Values.ToList(),
+                Houses = allHouses
+            };
         }
     }
 
-    private async Task UpdateDatabaseAsync(MakelaarLeaderboardContext context, ApiResponse data, CancellationToken cancellationToken)
+    private async Task UpdateDatabaseAsync(MakelaarLeaderboardContext context, ApiResponse data,
+        CancellationToken cancellationToken)
     {
-        // Get existing data
-        var existingMakelaarIds = await context.Makelaars.Select(m => m.MakelaarId).ToListAsync(cancellationToken);
-        var existingHouseIds = await context.Houses.Select(h => h.Id).ToListAsync(cancellationToken);
-
         // Update or add Makelaars
         if (data.Makelaars != null)
         {
