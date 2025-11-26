@@ -1,4 +1,5 @@
 ﻿using System.Linq;
+using System.Text;
 using System.Text.Json;
 using MakelaarLeaderboard.Data;
 using MakelaarLeaderboard.Models;
@@ -12,7 +13,7 @@ public class DataSyncService : BackgroundService
     private readonly ILogger<DataSyncService> _logger;
     private readonly IServiceProvider _serviceProvider;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly TimeSpan _syncInterval = TimeSpan.FromMinutes(1);
+    private readonly TimeSpan _syncInterval = TimeSpan.FromMinutes(5);
     private readonly JsonSerializerOptions _jsonSerializerOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -28,17 +29,36 @@ public class DataSyncService : BackgroundService
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _apiUri = configuration["DataSync:ApiUri"] ?? throw new Exception("DataSync:ApiUri not configured");
-        _apiUri += "/?type=koop&zo=/amsterdam/balkon/dakterras/tuin/&page=2&pagesize=25";
+    }
+
+    private async Task<string> PageUrlBuilder(string searchType = "koop", string city = "amsterdam", string[]? buitenruimtes = null, int page = 1, int pageSize = 25)
+    {
+        var sb = new StringBuilder(_apiUri);
+
+        await Task.Run(() =>
+        {
+            sb.Append($"?type={searchType}&zo=/{city}/");
+
+            if (buitenruimtes != null)
+            {
+                foreach (string buitenruimte in buitenruimtes)
+                    sb.Append($"{buitenruimte}/");
+            }
+
+            sb.Append($"&page={page}&pagesize={pageSize}");
+        });
+
+        _logger.LogInformation($"API Constructed:\n{sb}");
+
+        return sb.ToString();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("DataSyncService starting...");
 
-        // Initial database setup and data fetch
         await InitializeDatabaseAsync(stoppingToken);
 
-        // Periodic sync every 1 minute
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -48,7 +68,7 @@ public class DataSyncService : BackgroundService
             }
             catch (TaskCanceledException)
             {
-                _logger.LogInformation("DataSyncService is stopping.");
+                _logger.LogInformation("Data Sync Service is Stopping...");
                 break;
             }
             catch (Exception ex)
@@ -60,21 +80,18 @@ public class DataSyncService : BackgroundService
 
     private async Task InitializeDatabaseAsync(CancellationToken cancellationToken)
     {
-        using var scope = _serviceProvider.CreateScope();
+        using IServiceScope scope = _serviceProvider.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<MakelaarLeaderboardContext>();
 
         try
         {
-            // Ensure database is created
             await context.Database.EnsureCreatedAsync(cancellationToken);
 
-            // Clear all existing data on startup
             _logger.LogInformation("Clearing existing data from database...");
             context.Houses.RemoveRange(context.Houses);
             context.Makelaars.RemoveRange(context.Makelaars);
             await context.SaveChangesAsync(cancellationToken);
 
-            // Fetch fresh data
             await SyncDataAsync(cancellationToken);
 
             _logger.LogInformation("Database initialized successfully");
@@ -88,24 +105,24 @@ public class DataSyncService : BackgroundService
 
     private async Task SyncDataAsync(CancellationToken cancellationToken)
     {
-        using var scope = _serviceProvider.CreateScope();
+        using IServiceScope scope = _serviceProvider.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<MakelaarLeaderboardContext>();
 
         try
         {
-            _logger.LogInformation($"Fetching data from API: {_apiUri}");
+            ApiResponse? data = await FetchDataFromApiAsync(cancellationToken);
+            ApiResponse? dataHasTuin = await FetchDataFromApiAsync(cancellationToken, ["tuin"]);
 
-            var data = await FetchDataFromApiAsync(cancellationToken);
+            _logger.LogInformation($"data received:\n{data}");
 
-            _logger.LogInformation($"data: {data}");
-
-            if (data == null)
+            if (data == null || dataHasTuin == null)
             {
                 _logger.LogWarning("No data received from API");
                 return;
             }
 
             await UpdateDatabaseAsync(context, data, cancellationToken);
+            await UpdateDatabaseAsync(context, dataHasTuin, cancellationToken);
 
             _logger.LogInformation("Data sync completed successfully");
         }
@@ -115,28 +132,46 @@ public class DataSyncService : BackgroundService
         }
     }
 
-    private async Task<ApiResponse?> FetchDataFromApiAsync(CancellationToken cancellationToken)
+    private async Task<ApiResponse?> FetchDataFromApiAsync(CancellationToken cancellationToken, string[]? buitenruimtes = null)
     {
-        var httpClient = _httpClientFactory.CreateClient();
-            
-            try
+        HttpClient httpClient = _httpClientFactory.CreateClient();
+        var allHouses = new List<House>();
+        var makelaarsDict = new Dictionary<int, Makelaar>();
+
+        try
+        {
+            int currentPage = 1;
+            int totalPages = 1;
+
+            do
             {
-                var response = await httpClient.GetAsync(_apiUri, cancellationToken);
+                // Build URL with page parameter
+                string pageUrl = await PageUrlBuilder(buitenruimtes: buitenruimtes, page: currentPage);
+                _logger.LogInformation($"pageUrl:\n{pageUrl}");
+
+                _logger.LogInformation($"Fetching page {currentPage} from API");
+
+                HttpResponseMessage response = await httpClient.GetAsync(pageUrl, cancellationToken);
                 response.EnsureSuccessStatusCode();
 
-                var content = await response.Content.ReadAsStringAsync(cancellationToken);
+                string content = await response.Content.ReadAsStringAsync(cancellationToken);
+
                 var fundaResponse = JsonSerializer.Deserialize<FundaApiResponse>(content, _jsonSerializerOptions);
 
-                if (fundaResponse?.Objects == null)
+                if (fundaResponse?.Objects == null || fundaResponse.Objects.Count == 0)
                 {
-                    return null;
+                    _logger.LogInformation($"No more objects found on page {currentPage}");
+                    break;
                 }
 
-                // Transform Funda API response to our domain model
-                var houses = new List<House>();
-                var makelaarsDict = new Dictionary<int, Makelaar>();
+                if (fundaResponse.Paging != null)
+                {
+                    totalPages = fundaResponse.Paging.AantalPaginas;
+                    _logger.LogInformation($"Total pages available: {totalPages}");
+                }
 
-                foreach (var obj in fundaResponse.Objects)
+                // Transform current page data
+                foreach (FundaObject obj in fundaResponse.Objects)
                 {
                     // Extract Makelaar (unique by MakelaarId)
                     if (!makelaarsDict.ContainsKey(obj.MakelaarId))
@@ -148,11 +183,11 @@ public class DataSyncService : BackgroundService
                         };
                     }
 
-                    // Determine if the house has a garden (Tuin)
-                    bool hasTuin = obj.Perceeloppervlakte > 0;
+                    bool hasTuin = pageUrl.Contains("tuin", StringComparison.OrdinalIgnoreCase);
 
-                    // Create House entity
-                    houses.Add(new House
+                    _logger.LogInformation($"HasTuin {hasTuin}");
+
+                    allHouses.Add(new House
                     {
                         Id = obj.Id,
                         MakelaarId = obj.MakelaarId,
@@ -161,36 +196,51 @@ public class DataSyncService : BackgroundService
                     });
                 }
 
-                return new ApiResponse
+                currentPage++;
+
+                // Add a small delay between requests to respect API rate limits
+                // The funda API has a constraint of 100 req / 1 minute ==> 100 req / 60000 ms ==> 1 req / 600 ms
+                // The maximum pagesize is 25, we have to do at least 213 request which has exceeded the above limitation
+                // This means our delay should be at least 600ms, for convenient and some buffer, I use 610 ms here
+                if (currentPage <= totalPages)
                 {
-                    Makelaars = makelaarsDict.Values.ToList(),
-                    Houses = houses
-                };
-            }
-            catch (HttpRequestException ex)
+                    await Task.Delay(610, cancellationToken);
+                }
+
+            } while (currentPage <= totalPages && !cancellationToken.IsCancellationRequested);
+
+            _logger.LogInformation($"Fetched total of {allHouses.Count} houses and {makelaarsDict.Count} makelaars");
+
+            return new ApiResponse
             {
-                _logger.LogError(ex, "HTTP error fetching data from API");
-                return null;
-            }
-            catch (JsonException ex)
-            {
-                _logger.LogError(ex, "JSON deserialization error");
-                return null;
-            }
+                Makelaars = makelaarsDict.Values.ToList(),
+                Houses = allHouses
+            };
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "HTTP error fetching data from API");
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "JSON deserialization error");
+            return null;
+        }
     }
 
     private async Task UpdateDatabaseAsync(MakelaarLeaderboardContext context, ApiResponse data, CancellationToken cancellationToken)
     {
-        // Get existing data for comparison
+        // Get existing data
         var existingMakelaarIds = await context.Makelaars.Select(m => m.MakelaarId).ToListAsync(cancellationToken);
         var existingHouseIds = await context.Houses.Select(h => h.Id).ToListAsync(cancellationToken);
 
         // Update or add Makelaars
         if (data.Makelaars != null)
         {
-            foreach (var makelaar in data.Makelaars)
+            foreach (Makelaar makelaar in data.Makelaars)
             {
-                var existing = await context.Makelaars.FindAsync([makelaar.MakelaarId], cancellationToken);
+                Makelaar? existing = await context.Makelaars.FindAsync([makelaar.MakelaarId], cancellationToken);
 
                 if (existing != null)
                 {
@@ -211,9 +261,9 @@ public class DataSyncService : BackgroundService
         // Update or add Houses
         if (data.Houses != null)
         {
-            foreach (var house in data.Houses)
+            foreach (House house in data.Houses)
             {
-                var existing = await context.Houses.FindAsync([house.Id!], cancellationToken);
+                House? existing = await context.Houses.FindAsync([house.Id!], cancellationToken);
 
                 if (existing != null)
                 {
@@ -231,25 +281,6 @@ public class DataSyncService : BackgroundService
             }
         }
 
-        // Remove deleted items (optional - items not in the API response)
-        var newMakelaarIds = data.Makelaars?.Select(m => m.MakelaarId).ToList() ?? [];
-        var makelaarsToRemove = existingMakelaarIds.Except(newMakelaarIds).ToList();
-
-        if (makelaarsToRemove.Count != 0)
-        {
-            var toRemove = context.Makelaars.Where(m => makelaarsToRemove.Contains(m.MakelaarId));
-            context.Makelaars.RemoveRange(toRemove);
-        }
-
-        var newHouseIds = data.Houses?.Select(h => h.Id).ToList() ?? [];
-        var housesToRemove = existingHouseIds.Except(newHouseIds).ToList();
-
-        if (housesToRemove.Count != 0)
-        {
-            var toRemove = context.Houses.Where(h => housesToRemove.Contains(h.Id));
-            context.Houses.RemoveRange(toRemove);
-        }
-
         await context.SaveChangesAsync(cancellationToken);
     }
 
@@ -262,7 +293,8 @@ public class DataSyncService : BackgroundService
 
     private class FundaApiResponse
     {
-        public List<FundaObject>? Objects { get; set; }
+        public List<FundaObject>? Objects { get; init; }
+        public FundaPaging? Paging { get; init; }
     }
 
     private class FundaObject
@@ -271,6 +303,11 @@ public class DataSyncService : BackgroundService
         public int MakelaarId { get; set; }
         public string? MakelaarNaam { get; set; }
         public string? Woonplaats { get; set; }
-        public int? Perceeloppervlakte { get; set; } // Plot area - used to determine if has garden
+    }
+
+    private class FundaPaging
+    {
+        public int HuidigePagina { get; set; }
+        public int AantalPaginas { get; set; }
     }
 }

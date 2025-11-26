@@ -1,7 +1,43 @@
-﻿@{
+﻿@model IEnumerable<MakelaarLeaderboard.Models.LeaderboardViewModel>
+
+@{
     ViewData["Title"] = "Top 10";
 }
 
-<h3>Top 10 Makelaar that has the most object listed for sale in Amsterdam</h3>
+<h3>Top 10 Makelaar owns most houses in Amsterdam</h3>
 
-<p>Hello from our View Template!</p>
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th scope="col">
+                #
+            </th>
+            <th scope="col">
+                @Html.DisplayNameFor(model => model.MakelaarId)
+            </th>
+            <th scope="col">
+                @Html.DisplayNameFor(model => model.MakelaarNaam)
+            </th>
+            <th scope="col">
+                @Html.DisplayNameFor(model => model.HousesCount)
+            </th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var (index, item) in Model.Index())
+        {
+            <tr>
+                <th scope="row">@(index + 1)</th>
+                <td>
+                    @Html.DisplayFor(modelItem => item.MakelaarId)
+                </td>
+                <td>
+                    @Html.DisplayFor(modelItem => item.MakelaarNaam)
+                </td>
+                <td>
+                    @Html.DisplayFor(modelItem => item.HousesCount)
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>

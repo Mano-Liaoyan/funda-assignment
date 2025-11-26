@@ -11,7 +11,7 @@ namespace MakelaarLeaderboard
             var builder = WebApplication.CreateBuilder(args);
             builder.Services.AddDbContext<MakelaarLeaderboardContext>(options =>
                 options.UseSqlite(builder.Configuration.GetConnectionString("MakelaarLeaderboardContext") ?? throw new InvalidOperationException("Connection string 'MakelaarLeaderboardContext' not found.")));
-            
+
             builder.Services.AddHttpClient();
             builder.Services.AddHostedService<DataSyncService>();
 
@@ -36,7 +36,7 @@ namespace MakelaarLeaderboard
             app.MapStaticAssets();
             app.MapControllerRoute(
                 name: "default",
-                pattern: "{controller=Home}/{action=Index}/{id?}")
+                pattern: "{controller=Leaderboard}/{action=Index}/{id?}")
                 .WithStaticAssets();
 
             app.Run();
