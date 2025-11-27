@@ -83,18 +83,8 @@ public class DataSyncService : BackgroundService
 
     private async Task InitializeDatabaseAsync(CancellationToken cancellationToken)
     {
-        using IServiceScope scope = _serviceProvider.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<MakelaarLeaderboardContext>();
-
         try
         {
-            await context.Database.EnsureCreatedAsync(cancellationToken);
-
-            _logger.LogInformation("Clearing existing data from database...");
-            context.Houses.RemoveRange(context.Houses);
-            context.Makelaars.RemoveRange(context.Makelaars);
-            await context.SaveChangesAsync(cancellationToken);
-
             await SyncDataAsync(cancellationToken);
 
             _logger.LogInformation("Database initialized successfully");
@@ -123,6 +113,12 @@ public class DataSyncService : BackgroundService
                 _logger.LogWarning("No data received from API");
                 return;
             }
+
+            _logger.LogInformation("Clearing existing data from database...");
+            context.Houses.RemoveRange(context.Houses);
+            context.Makelaars.RemoveRange(context.Makelaars);
+            await context.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("Existing data cleared");
 
             await UpdateDatabaseAsync(context, data, cancellationToken);
             await UpdateDatabaseAsync(context, dataHasTuin, cancellationToken);
@@ -265,6 +261,7 @@ public class DataSyncService : BackgroundService
     private async Task UpdateDatabaseAsync(MakelaarLeaderboardContext context, ApiResponse data,
         CancellationToken cancellationToken)
     {
+        _logger.LogInformation("Updating database ...");
         // Update or add Makelaars
         if (data.Makelaars != null)
         {
@@ -312,6 +309,7 @@ public class DataSyncService : BackgroundService
         }
 
         await context.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation("Database Updated ...");
     }
 
     // Helper class to deserialize API response
