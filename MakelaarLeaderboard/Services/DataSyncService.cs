@@ -14,7 +14,7 @@ public class DataSyncService : BackgroundService
     private readonly ILogger<DataSyncService> _logger;
     private readonly IServiceProvider _serviceProvider;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly TimeSpan _syncInterval = TimeSpan.FromMinutes(5);
+    private readonly TimeSpan _syncInterval = TimeSpan.FromHours(1);
 
     private readonly JsonSerializerOptions _jsonSerializerOptions = new()
     {
@@ -58,7 +58,7 @@ public class DataSyncService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("DataSyncService starting...");
+        _logger.LogInformation("Data Sync Service starting...");
 
         await InitializeDatabaseAsync(stoppingToken);
 
@@ -226,10 +226,10 @@ public class DataSyncService : BackgroundService
                 // Add a small delay between requests to respect API rate limits
                 // The funda API has a constraint of 100 req / 1 minute ==> 100 req / 60000 ms ==> 1 req / 600 ms
                 // The maximum pagesize is 25, we have to do at least 213 request which has exceeded the above limitation
-                // This means our delay should be at least 600ms, for convenient and some buffer, I use 610 ms here
+                // This means our delay should be at least 600ms, since we have retry mechanism and for convenient, I use 100 ms here
                 if (currentPage <= totalPages)
                 {
-                    await Task.Delay(10, cancellationToken);
+                    await Task.Delay(100, cancellationToken);
                 }
             } while (currentPage <= totalPages && retryCount < maxRetries &&
                      !cancellationToken.IsCancellationRequested);
