@@ -1,0 +1,8 @@
+services:
+  funda_app:
+    image: valkyliao/makelaarleaderboard:latest
+    container_name: funda_app
+    restart: always
+    ports:
+      - "18080:8080"
+      - "18081:8081"
