@@ -10,7 +10,7 @@ This repository contains an ASP.NET 10 MVC solution that implements a simple lea
   - Top 10 makelaars by houses that include a garden.
 - Uses simple await TimeSpan to implement retry policies and rate limiting
 
-![Home Page](docs/pictures/homepage.png)
+![Home Page](docs/pictures/HomePage.png)
 
 ## ▶️ Installation & Usage
 
