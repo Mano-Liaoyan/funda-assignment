@@ -83,8 +83,12 @@ public class DataSyncService : BackgroundService
 
     private async Task InitializeDatabaseAsync(CancellationToken cancellationToken)
     {
+        using var scope = _serviceProvider.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<MakelaarLeaderboardContext>();
+
         try
         {
+            await context.Database.EnsureCreatedAsync(cancellationToken);
             await SyncDataAsync(cancellationToken);
 
             _logger.LogInformation("Database initialized successfully");
@@ -98,7 +102,7 @@ public class DataSyncService : BackgroundService
 
     private async Task SyncDataAsync(CancellationToken cancellationToken)
     {
-        using IServiceScope scope = _serviceProvider.CreateScope();
+        using var scope = _serviceProvider.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<MakelaarLeaderboardContext>();
 
         try
